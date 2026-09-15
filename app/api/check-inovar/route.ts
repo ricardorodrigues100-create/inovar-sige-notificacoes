@@ -220,6 +220,7 @@ export async function GET(request: Request) {
       }
     }
 
+    let emailError: string | null = null;
     if (newEvents.length > 0) {
       const linhas = newEvents
         .map((e) => {
@@ -232,15 +233,24 @@ export async function GET(request: Request) {
         })
         .join("\n");
 
-      await resend.emails.send({
+      const { error } = await resend.emails.send({
         from: process.env.NOTIFY_FROM_EMAIL!,
         to: process.env.NOTIFY_TO_EMAIL!,
         subject: `InovarSIGE: ${newEvents.length} novo(s) registo(s)`,
         text: linhas,
       });
+
+      if (error) {
+        console.error("Resend falhou ao enviar:", error);
+        emailError = error.message ?? JSON.stringify(error);
+      }
     }
 
-    return NextResponse.json({ checked: events.length, new: newEvents.length });
+    return NextResponse.json({
+      checked: events.length,
+      new: newEvents.length,
+      emailError,
+    });
   } catch (err) {
     console.error("Erro ao verificar InovarSIGE:", err);
     return NextResponse.json({ error: String(err) }, { status: 500 });
