@@ -58,7 +58,7 @@ function parseAspNetDate(value: string): Date {
 /** Faz login no InovarSIGE e devolve a string de cookies da sessão autenticada. */
 async function login(): Promise<string> {
   const body = new URLSearchParams({
-    Type: "1", // 1 = Encarregado de Educação (Nº processo + PIN)
+    Type: "0", // 0 = Utilizador (Nº de Cartão + PIN)
     User: process.env.INOVAR_USER!,
     Password: process.env.INOVAR_PASSWORD!,
   });
