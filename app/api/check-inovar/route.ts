@@ -7,6 +7,15 @@ export const dynamic = "force-dynamic";
 
 const BASE_URL = "https://portalsige.damiaodegoes.pt/InovarSIGE";
 
+// Cabeçalhos que fazem o pedido parecer vindo de um browser normal —
+// alguns sites bloqueiam pedidos que não os têm.
+const BROWSER_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
+};
+
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -48,7 +57,11 @@ async function login(): Promise<string> {
 
   const res = await fetch(`${BASE_URL}/`, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: {
+      ...BROWSER_HEADERS,
+      "Content-Type": "application/x-www-form-urlencoded",
+      Referer: `${BASE_URL}/`,
+    },
     body: body.toString(),
     redirect: "manual",
   });
@@ -60,7 +73,10 @@ async function login(): Promise<string> {
   if (res.status === 302 || res.status === 301) {
     const location = res.headers.get("location") ?? "/";
     const res2 = await fetch(new URL(location, `${BASE_URL}/`).toString(), {
-      headers: cookies ? { Cookie: cookies } : undefined,
+      headers: {
+        ...BROWSER_HEADERS,
+        ...(cookies ? { Cookie: cookies } : {}),
+      },
       redirect: "manual",
     });
     const cookies2 = extractCookies(res2.headers);
@@ -91,15 +107,21 @@ async function fetchHistory(cookie: string): Promise<InovarEvent[]> {
   const res = await fetch(`${BASE_URL}/Access/GetHistoryByUtilizador`, {
     method: "POST",
     headers: {
+      ...BROWSER_HEADERS,
       "Content-Type": "application/x-www-form-urlencoded",
       Cookie: cookie,
+      Referer: `${BASE_URL}/`,
+      "X-Requested-With": "XMLHttpRequest",
     },
     body: body.toString(),
   });
 
   const contentType = res.headers.get("content-type") ?? "";
   if (!res.ok || !contentType.includes("application/json")) {
-    throw new Error("Sessão inválida ou expirada");
+    const snippet = (await res.text()).slice(0, 300).replace(/\s+/g, " ");
+    throw new Error(
+      `Sessão inválida ou expirada (status ${res.status}, content-type "${contentType}"): ${snippet}`
+    );
   }
 
   const json = await res.json();
