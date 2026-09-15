@@ -34,6 +34,16 @@ type InovarEvent = {
   Obs: string;
 };
 
+type InovarDocumento = {
+  ID: number;
+  Descricao: string;
+  Data: string; // formato "/Date(1789461937783)/"
+  NomeDocumento: string;
+  Posto: string;
+  Total: number;
+  Saldo: number;
+};
+
 /** Extrai e junta todos os cookies Set-Cookie de uma resposta fetch. */
 function extractCookies(headers: Headers): string {
   // getSetCookie() existe no runtime Node.js (undici) usado pelas API routes.
@@ -53,6 +63,20 @@ function cookieNames(cookieStr: string): string[] {
 function parseAspNetDate(value: string): Date {
   const match = value.match(/\d+/);
   return new Date(Number(match?.[0] ?? 0));
+}
+
+/** Formata data/hora no fuso de Lisboa, no estilo "15/09/2026, 08:18". */
+function formatDataHora(value: string): string {
+  return parseAspNetDate(value).toLocaleString("pt-PT", {
+    timeZone: "Europe/Lisbon",
+    dateStyle: "short",
+    timeStyle: "short",
+  });
+}
+
+/** Formata um valor em euros, com sinal, ex: "-0,35 €" ou "20,00 €". */
+function formatEuro(value: number): string {
+  return new Intl.NumberFormat("pt-PT", { style: "currency", currency: "EUR" }).format(value);
 }
 
 /** Traduz o código Tipo do InovarSIGE em rótulo e ícone (confirmado com dados reais). */
@@ -160,8 +184,8 @@ async function tryFetchHistory(cookie: string): Promise<InovarEvent[] | null> {
   }
 }
 
-/** TEMPORÁRIO — só para diagnóstico: devolve a resposta em bruto do GetDocumentosByConta. */
-async function debugFetchDocumentos(cookie: string) {
+/** Vai buscar os documentos/movimentos de conta (faturas, carregamentos) e o saldo. */
+async function fetchDocumentos(cookie: string): Promise<InovarDocumento[]> {
   const body = new URLSearchParams({
     sort: "Data-desc",
     page: "1",
@@ -170,6 +194,7 @@ async function debugFetchDocumentos(cookie: string) {
     filter: "",
   });
   const url = `${BASE_URL}/Transactions/GetDocumentosByConta?contaID=${process.env.INOVAR_CONTA_ID}&TipoConta=Normal`;
+
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -181,12 +206,17 @@ async function debugFetchDocumentos(cookie: string) {
     },
     body: body.toString(),
   });
-  const text = await res.text();
-  return {
-    status: res.status,
-    contentType: res.headers.get("content-type"),
-    bodyPreview: text.slice(0, 2000),
-  };
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!res.ok || !contentType.includes("application/json")) {
+    const snippet = (await res.text()).slice(0, 300).replace(/\s+/g, " ");
+    throw new Error(
+      `Sessão inválida ou expirada (documentos, status ${res.status}, content-type "${contentType}"): ${snippet}`
+    );
+  }
+
+  const json = await res.json();
+  return (json.Data ?? []) as InovarDocumento[];
 }
 
 const SESSION_ROW_ID = 1;
@@ -230,10 +260,10 @@ export async function GET(request: Request) {
       events = await fetchHistory(cookie);
     }
 
-    const newEvents: InovarEvent[] = [];
+    const documentos = await fetchDocumentos(cookie!);
 
-    // A API devolve os eventos mais recentes primeiro; verificamos cada um
-    // contra a tabela de eventos já vistos na Supabase.
+    // --- Entradas / saídas novas ---
+    const newEvents: InovarEvent[] = [];
     for (const event of events) {
       const { data: existing } = await supabase
         .from("inovar_events")
@@ -256,32 +286,66 @@ export async function GET(request: Request) {
       }
     }
 
+    // --- Documentos / movimentos de conta novos ---
+    const newDocumentos: InovarDocumento[] = [];
+    for (const doc of documentos) {
+      const { data: existing } = await supabase
+        .from("inovar_documentos")
+        .select("id")
+        .eq("id", doc.ID)
+        .maybeSingle();
+
+      if (!existing) {
+        newDocumentos.push(doc);
+        await supabase.from("inovar_documentos").insert({
+          id: doc.ID,
+          descricao: doc.Descricao,
+          data: parseAspNetDate(doc.Data).toISOString(),
+          nome_documento: doc.NomeDocumento,
+          posto: doc.Posto,
+          total: doc.Total,
+          saldo: doc.Saldo,
+        });
+      }
+    }
+
+    const currentSaldo = documentos[0]?.Saldo ?? null;
+    const shouldNotify = newEvents.length > 0 || newDocumentos.length > 0;
+
     let emailError: string | null = null;
-    if (newEvents.length > 0) {
-      const linhasTexto = newEvents
+
+    if (shouldNotify) {
+      // --- Texto simples ---
+      const eventosTexto = newEvents
         .map((e) => {
           const { label, icon } = eventLabel(e.Tipo);
-          const dataFormatada = parseAspNetDate(e.Data).toLocaleString("pt-PT", {
-            timeZone: "Europe/Lisbon",
-            dateStyle: "short",
-            timeStyle: "short",
-          });
-          return `${icon} ${label} — ${dataFormatada} — ${e.Local} (${e.PontoAcesso})`;
+          return `${icon} ${label} — ${formatDataHora(e.Data)} — ${e.Local} (${e.PontoAcesso})`;
         })
         .join("\n");
 
-      const linhasHtml = newEvents
+      const documentosTexto = newDocumentos
+        .map(
+          (d) =>
+            `${d.NomeDocumento} — ${d.Descricao} — ${formatEuro(d.Total)} — ${formatDataHora(d.Data)}`
+        )
+        .join("\n");
+
+      const text = [
+        newEvents.length > 0 ? `Entradas/Saídas:\n${eventosTexto}` : null,
+        newDocumentos.length > 0 ? `Movimentos de conta:\n${documentosTexto}` : null,
+        currentSaldo !== null ? `Saldo atual: ${formatEuro(currentSaldo)}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+
+      // --- HTML ---
+      const eventosHtml = newEvents
         .map((e) => {
           const { label, icon, color } = eventLabel(e.Tipo);
-          const dataFormatada = parseAspNetDate(e.Data).toLocaleString("pt-PT", {
-            timeZone: "Europe/Lisbon",
-            dateStyle: "short",
-            timeStyle: "short",
-          });
           return `
             <li style="padding:10px 0;border-bottom:1px solid #eee;list-style:none;">
               <span style="color:${color};font-weight:bold;font-size:15px;">${icon} ${label}</span>
-              <span style="float:right;color:#333;font-size:14px;">${dataFormatada}</span>
+              <span style="float:right;color:#333;font-size:14px;">${formatDataHora(e.Data)}</span>
               <div style="clear:both;color:#777;font-size:13px;margin-top:2px;">
                 ${e.Local} · ${e.PontoAcesso}
               </div>
@@ -289,17 +353,52 @@ export async function GET(request: Request) {
         })
         .join("");
 
+      const documentosHtml = newDocumentos
+        .map((d) => {
+          const cor = d.Total < 0 ? "#c62828" : "#2e7d32";
+          return `
+            <li style="padding:10px 0;border-bottom:1px solid #eee;list-style:none;">
+              <span style="font-weight:bold;font-size:15px;color:#333;">${d.NomeDocumento}</span>
+              <span style="float:right;color:${cor};font-weight:bold;font-size:14px;">${formatEuro(d.Total)}</span>
+              <div style="clear:both;color:#777;font-size:13px;margin-top:2px;">
+                ${d.Descricao} · ${formatDataHora(d.Data)}
+              </div>
+            </li>`;
+        })
+        .join("");
+
       const html = `
         <div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;">
-          <h2 style="font-size:17px;color:#222;">InovarSIGE — novo(s) registo(s)</h2>
-          <ul style="padding:0;margin:0;">${linhasHtml}</ul>
+          ${
+            newEvents.length > 0
+              ? `<h2 style="font-size:16px;color:#222;">Entradas / Saídas</h2>
+                 <ul style="padding:0;margin:0 0 16px;">${eventosHtml}</ul>`
+              : ""
+          }
+          ${
+            newDocumentos.length > 0
+              ? `<h2 style="font-size:16px;color:#222;">Movimentos de conta</h2>
+                 <ul style="padding:0;margin:0 0 16px;">${documentosHtml}</ul>`
+              : ""
+          }
+          ${
+            currentSaldo !== null
+              ? `<div style="background:#f5f5f5;border-radius:8px;padding:12px 16px;font-size:15px;color:#222;">
+                   Saldo atual: <strong>${formatEuro(currentSaldo)}</strong>
+                 </div>`
+              : ""
+          }
         </div>`;
+
+      const partes = [];
+      if (newEvents.length > 0) partes.push(`${newEvents.length} registo(s)`);
+      if (newDocumentos.length > 0) partes.push(`${newDocumentos.length} movimento(s)`);
 
       const { error } = await resend.emails.send({
         from: process.env.NOTIFY_FROM_EMAIL!,
         to: process.env.NOTIFY_TO_EMAIL!,
-        subject: `InovarSIGE: ${newEvents.length} novo(s) registo(s)`,
-        text: linhasTexto,
+        subject: `InovarSIGE: ${partes.join(", ")}`,
+        text,
         html,
       });
 
@@ -311,11 +410,12 @@ export async function GET(request: Request) {
 
     return NextResponse.json({
       checked: events.length,
-      new: newEvents.length,
+      newEvents: newEvents.length,
+      checkedDocumentos: documentos.length,
+      newDocumentos: newDocumentos.length,
+      saldo: currentSaldo,
+      notified: shouldNotify,
       emailError,
-      ...(new URL(request.url).searchParams.get("debug") === "1"
-        ? { debugDocumentos: await debugFetchDocumentos(cookie!) }
-        : {}),
     });
   } catch (err) {
     console.error("Erro ao verificar InovarSIGE:", err);
