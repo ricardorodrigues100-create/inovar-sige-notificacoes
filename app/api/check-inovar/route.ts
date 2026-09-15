@@ -160,6 +160,35 @@ async function tryFetchHistory(cookie: string): Promise<InovarEvent[] | null> {
   }
 }
 
+/** TEMPORÁRIO — só para diagnóstico: devolve a resposta em bruto do GetDocumentosByConta. */
+async function debugFetchDocumentos(cookie: string) {
+  const body = new URLSearchParams({
+    sort: "Data-desc",
+    page: "1",
+    pageSize: "5",
+    group: "",
+    filter: "",
+  });
+  const url = `${BASE_URL}/Transactions/GetDocumentosByConta?contaID=${process.env.INOVAR_CONTA_ID}&TipoConta=Normal`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...BROWSER_HEADERS,
+      "Content-Type": "application/x-www-form-urlencoded",
+      Cookie: cookie,
+      Referer: `${BASE_URL}/`,
+      "X-Requested-With": "XMLHttpRequest",
+    },
+    body: body.toString(),
+  });
+  const text = await res.text();
+  return {
+    status: res.status,
+    contentType: res.headers.get("content-type"),
+    bodyPreview: text.slice(0, 2000),
+  };
+}
+
 const SESSION_ROW_ID = 1;
 
 /** Lê o cookie de sessão guardado na Supabase, se existir. */
@@ -284,6 +313,9 @@ export async function GET(request: Request) {
       checked: events.length,
       new: newEvents.length,
       emailError,
+      ...(new URL(request.url).searchParams.get("debug") === "1"
+        ? { debugDocumentos: await debugFetchDocumentos(cookie!) }
+        : {}),
     });
   } catch (err) {
     console.error("Erro ao verificar InovarSIGE:", err);
