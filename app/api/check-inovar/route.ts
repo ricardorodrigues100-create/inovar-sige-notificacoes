@@ -41,6 +41,14 @@ function extractCookies(headers: Headers): string {
   return raw.map((c) => c.split(";")[0]).join("; ");
 }
 
+/** Lista só os nomes dos cookies (sem valores) para diagnóstico seguro. */
+function cookieNames(cookieStr: string): string[] {
+  return cookieStr
+    .split("; ")
+    .filter(Boolean)
+    .map((c) => c.split("=")[0]);
+}
+
 /** Converte o formato de data do ASP.NET "/Date(169999...)/" para Date. */
 function parseAspNetDate(value: string): Date {
   const match = value.match(/\d+/);
@@ -85,7 +93,15 @@ async function login(): Promise<string> {
 
   if (!cookies) {
     throw new Error(
-      "Login no InovarSIGE falhou: nenhum cookie de sessão foi recebido. Verifica as credenciais."
+      `Login no InovarSIGE falhou: nenhum cookie de sessão foi recebido (status ${res.status}). Verifica as credenciais.`
+    );
+  }
+
+  const names = cookieNames(cookies);
+  const hasAuthCookie = names.some((n) => n.toLowerCase().includes("aspxauth"));
+  if (!hasAuthCookie) {
+    throw new Error(
+      `Login pode ter falhado: recebi os cookies [${names.join(", ")}] mas falta o cookie de autenticação (status do POST de login: ${res.status}). Verifica o INOVAR_USER, INOVAR_PASSWORD e se o Type (0 ou 1) está correto.`
     );
   }
 
