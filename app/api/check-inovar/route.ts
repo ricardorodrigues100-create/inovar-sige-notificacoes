@@ -55,6 +55,13 @@ function parseAspNetDate(value: string): Date {
   return new Date(Number(match?.[0] ?? 0));
 }
 
+/** Traduz o código Tipo do InovarSIGE em rótulo e ícone (confirmado com dados reais). */
+function eventLabel(tipo: number): { label: string; icon: string; color: string } {
+  if (tipo === 1) return { label: "Entrada", icon: "⬇", color: "#2e7d32" };
+  if (tipo === 9) return { label: "Saída", icon: "⬆", color: "#2e7d32" };
+  return { label: `Tipo ${tipo}`, icon: "•", color: "#666" };
+}
+
 /** Faz login no InovarSIGE e devolve a string de cookies da sessão autenticada. */
 async function login(): Promise<string> {
   const body = new URLSearchParams({
@@ -222,22 +229,49 @@ export async function GET(request: Request) {
 
     let emailError: string | null = null;
     if (newEvents.length > 0) {
-      const linhas = newEvents
+      const linhasTexto = newEvents
         .map((e) => {
+          const { label, icon } = eventLabel(e.Tipo);
           const dataFormatada = parseAspNetDate(e.Data).toLocaleString("pt-PT", {
             timeZone: "Europe/Lisbon",
             dateStyle: "short",
-            timeStyle: "medium",
+            timeStyle: "short",
           });
-          return `${dataFormatada} — ${e.Local} (${e.PontoAcesso}) — ${e.Motivo} [Tipo ${e.Tipo}]`;
+          return `${icon} ${label} — ${dataFormatada} — ${e.Local} (${e.PontoAcesso})`;
         })
         .join("\n");
+
+      const linhasHtml = newEvents
+        .map((e) => {
+          const { label, icon, color } = eventLabel(e.Tipo);
+          const dataFormatada = parseAspNetDate(e.Data).toLocaleString("pt-PT", {
+            timeZone: "Europe/Lisbon",
+            dateStyle: "short",
+            timeStyle: "short",
+          });
+          return `
+            <li style="padding:10px 0;border-bottom:1px solid #eee;list-style:none;">
+              <span style="color:${color};font-weight:bold;font-size:15px;">${icon} ${label}</span>
+              <span style="float:right;color:#333;font-size:14px;">${dataFormatada}</span>
+              <div style="clear:both;color:#777;font-size:13px;margin-top:2px;">
+                ${e.Local} · ${e.PontoAcesso}
+              </div>
+            </li>`;
+        })
+        .join("");
+
+      const html = `
+        <div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;">
+          <h2 style="font-size:17px;color:#222;">InovarSIGE — novo(s) registo(s)</h2>
+          <ul style="padding:0;margin:0;">${linhasHtml}</ul>
+        </div>`;
 
       const { error } = await resend.emails.send({
         from: process.env.NOTIFY_FROM_EMAIL!,
         to: process.env.NOTIFY_TO_EMAIL!,
         subject: `InovarSIGE: ${newEvents.length} novo(s) registo(s)`,
-        text: linhas,
+        text: linhasTexto,
+        html,
       });
 
       if (error) {
