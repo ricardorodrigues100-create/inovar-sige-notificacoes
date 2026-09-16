@@ -219,7 +219,45 @@ async function fetchDocumentos(cookie: string): Promise<InovarDocumento[]> {
   return (json.Data ?? []) as InovarDocumento[];
 }
 
+/** Envia uma mensagem de texto para o WhatsApp via CallMeBot. Devolve null se OK, ou uma mensagem de erro. */
+async function sendWhatsApp(text: string): Promise<string | null> {
+  try {
+    const url = new URL("https://api.callmebot.com/whatsapp.php");
+    url.searchParams.set("phone", process.env.WHATSAPP_PHONE!);
+    url.searchParams.set("apikey", process.env.CALLMEBOT_API_KEY!);
+    url.searchParams.set("text", text);
+
+    const res = await fetch(url.toString());
+    if (!res.ok) {
+      const body = (await res.text()).slice(0, 200);
+      return `CallMeBot falhou (status ${res.status}): ${body}`;
+    }
+    return null;
+  } catch (err) {
+    return `Erro ao enviar WhatsApp: ${String(err)}`;
+  }
+}
+
 const SESSION_ROW_ID = 1;
+
+/** Verifica se a hora atual em Lisboa está entre as 07:00 e as 19:30. */
+function isWithinCheckWindow(): boolean {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Lisbon",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+
+  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  const minutesSinceMidnight = hour * 60 + minute;
+
+  const inicio = 7 * 60; // 07:00
+  const fim = 19 * 60 + 30; // 19:30
+
+  return minutesSinceMidnight >= inicio && minutesSinceMidnight < fim;
+}
 
 /** Lê o cookie de sessão guardado na Supabase, se existir. */
 async function getStoredCookie(): Promise<string | null> {
@@ -246,6 +284,13 @@ export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+
+  if (!isWithinCheckWindow()) {
+    return NextResponse.json({
+      skipped: true,
+      reason: "Fora do horário de verificação (07:00–19:30, hora de Lisboa)",
+    });
   }
 
   try {
@@ -313,6 +358,7 @@ export async function GET(request: Request) {
     const shouldNotify = newEvents.length > 0 || newDocumentos.length > 0;
 
     let emailError: string | null = null;
+    let whatsappError: string | null = null;
 
     if (shouldNotify) {
       // --- Texto simples ---
@@ -406,6 +452,11 @@ export async function GET(request: Request) {
         console.error("Resend falhou ao enviar:", error);
         emailError = error.message ?? JSON.stringify(error);
       }
+
+      whatsappError = await sendWhatsApp(text);
+      if (whatsappError) {
+        console.error("CallMeBot falhou ao enviar:", whatsappError);
+      }
     }
 
     return NextResponse.json({
@@ -416,6 +467,7 @@ export async function GET(request: Request) {
       saldo: currentSaldo,
       notified: shouldNotify,
       emailError,
+      whatsappError,
     });
   } catch (err) {
     console.error("Erro ao verificar InovarSIGE:", err);
