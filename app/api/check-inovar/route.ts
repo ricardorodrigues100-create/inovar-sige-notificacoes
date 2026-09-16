@@ -240,19 +240,25 @@ async function sendWhatsApp(text: string): Promise<string | null> {
 
 const SESSION_ROW_ID = 1;
 
-/** Verifica se a hora atual em Lisboa está entre as 07:00 e as 19:30. */
+/** Verifica se a hora atual em Lisboa está entre as 07:00 e as 19:30, de segunda a sexta. */
 function isWithinCheckWindow(): boolean {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/Lisbon",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
+    weekday: "short",
   }).formatToParts(new Date());
 
   const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
   const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
-  const minutesSinceMidnight = hour * 60 + minute;
+  const weekday = parts.find((p) => p.type === "weekday")?.value ?? "";
 
+  if (weekday === "Sat" || weekday === "Sun") {
+    return false;
+  }
+
+  const minutesSinceMidnight = hour * 60 + minute;
   const inicio = 7 * 60; // 07:00
   const fim = 19 * 60 + 30; // 19:30
 
@@ -289,7 +295,7 @@ export async function GET(request: Request) {
   if (!isWithinCheckWindow()) {
     return NextResponse.json({
       skipped: true,
-      reason: "Fora do horário de verificação (07:00–19:30, hora de Lisboa)",
+      reason: "Fora do horário de verificação (dias úteis, 07:00–19:30, hora de Lisboa)",
     });
   }
 
